@@ -8,7 +8,8 @@ import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
-
+from pathlib import Path
+from cs336_basics import *
 
 def run_linear(
     d_in: int,
@@ -522,7 +523,7 @@ def run_load_checkpoint(
     src: str | os.PathLike | BinaryIO | IO[bytes],
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-):
+) -> int:
     """
     Given a serialized checkpoint (path or file-like object), restore the
     serialized state to the given model and optimizer.
@@ -589,4 +590,8 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    return _run_bpe_trainning(
+        input_path=Path(input_path),
+        vocab_size=vocab_size,
+        special_tokens=special_tokens,
+    )

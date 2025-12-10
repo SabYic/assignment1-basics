@@ -47,7 +47,7 @@ def test_train_bpe():
             )
             for merge_token_1, merge_token_2 in gpt2_reference_merges
         ]
-    assert merges == reference_merges
+    assert merges == reference_merges, "Merges do not match the reference implementation."
 
     # Compare the vocab to the expected output vocab
     with open(reference_vocab_path, encoding="utf-8") as f:
@@ -58,8 +58,8 @@ def test_train_bpe():
         }
     # Rather than checking that the vocabs exactly match (since they could
     # have been constructed differently, we'll make sure that the vocab keys and values match)
-    assert set(vocab.keys()) == set(reference_vocab.keys())
-    assert set(vocab.values()) == set(reference_vocab.values())
+    assert set(vocab.keys()) == set(reference_vocab.keys()), "Vocabulary keys do not match the reference implementation."
+    assert set(vocab.values()) == set(reference_vocab.values()), "Vocabulary values do not match the reference implementation."
 
 
 def test_train_bpe_special_tokens(snapshot):
