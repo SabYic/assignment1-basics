@@ -6,7 +6,7 @@ from pathlib import Path
 import os
 from typing import BinaryIO
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def _run_bpe_trainning(
     input_path: Path,
@@ -29,51 +29,61 @@ def _run_bpe_trainning(
               Merges are ordered by order of creation.
     """
 
-    split_special = b"<|endoftext|>"
+    vocab=[]
     word_freqs=defaultdict(int)
-    counts = count_pretokens_parallel(
-        input_path,
-        2,
-        split_special,
-        special_tokens,
-    )
-    for token, freq in counts.items():
-        word_freqs[repr(token)] = freq
-    vocab = []
+    pair_freqs=defaultdict(int)
+    process_num=4
+    chunk_list=[]
+    encode_txt=[]
+    with open(input_path, "rb") as f:
+        num_processes = 4
+        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
 
-    for word in word_freqs.keys():
-        for letter in word:
-            if letter not in vocab:
-                vocab.append(letter)
-    vocab.sort()
-   # print("Vocabulary:", vocab)
-    splits = {word:[c for c in word] for word in word_freqs.keys()}
+        # The following is a serial implementation, but you can parallelize this
+        # by sending each start/end pair to a set of processes.
+        for start, end in zip(boundaries[:-1], boundaries[1:]):
+            f.seek(start)
+            chunk = f.read(end - start).decode("utf-8", errors="ignore")
+            chunk_list.append(chunk)
+    vocab=dict[int, bytes]
+    vocab={x: bytes([x]) for x in range(256)}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(encode, chunk_list[i]) for i in range(len(chunk_list))]
+        for f in as_completed(futures):
+            encode_txt.extend(f.result())
+
     merges=[]
     while len(vocab) < vocab_size:
-        pair_freqs = get_stats(word_freqs)
-        best_pair = ""
+        pair_freqs = get_stats(encode_txt)
+       # print(pair_freqs)
+        best_pair = None
         max_freq = None
         for pair, freq in pair_freqs.items():
             if max_freq is None or max_freq < freq:
                 best_pair = pair
                 max_freq = freq
-        splits = merge_vocab(*best_pair, splits,word_freqs)
-        vocab.append(best_pair[0] + best_pair[1])
-        merges.append(tuple([best_pair[0] , best_pair[1]]))
+        new_index=len(vocab)+256
+        vocab[new_index]=vocab[best_pair[0]]+vocab[best_pair[1]]
+        encode_txt = merge_vocab(*best_pair, encode_txt,new_index)
+       # print(best_pair[0],best_pair[1])
+        merges.append(tuple((vocab[best_pair[0]],vocab[best_pair[1]])))
     return vocab, merges
     
         
 
-def get_stats(vocab_items: defaultdict) -> dict[tuple[str, str], int]:
-   pairs= defaultdict(int)
-   for word,freq in vocab_items.items():
-       symbols = list(word)
-       for i in range(len(symbols) - 1):
-           pair = (symbols[i], symbols[i + 1])
-           pairs[pair] += freq
-   return pairs
+def encode(input_strings:str)->list[int]:
+    indices = list(map(int,input_strings.encode("utf-8")))
+    return indices
+
+def get_stats(indice:list) -> dict[tuple[int, int], int]:
+    pairs= defaultdict(int)
+   
+    for i in range(len(indice) - 2):
+        pair = (indice[i], indice[i + 1])
+        pairs[pair] += 1
+    return pairs
     
-def merge_vocab(a: str, b: str, splits: list[str] ,word_freq: defaultdict[int]) -> list[str]:
+def merge_vocab(a: int, b: int, splits: list[int], new_index:int ) -> list[str]:
     """
     Merge vocabulary tokens according to the BPE merges.
 
@@ -84,126 +94,16 @@ def merge_vocab(a: str, b: str, splits: list[str] ,word_freq: defaultdict[int]) 
     Returns:
         The updated vocabulary after applying the merges.
     """
-    for word in word_freq.keys():
-        split_word = splits[word]
-        i=0
-        while i < len(split_word) - 1:
-            token1 = split_word[i]
-            token2 = split_word[i + 1]
-            if token1 == a and token2 == b:
-                # Merge the tokens
-                split_word[i] = token1 + token2
-                del split_word[i + 1]
-            else:
-                i += 1
+    i = 0
+    while i < len(splits) - 1:
+        token1 = splits[i]
+        token2 = splits[i + 1]
+
+        if token1 == a and token2 == b:
+            splits[i] = new_index
+            del splits[i + 1]
+            # ⚠️ 不 i += 1（因为新 token 可能继续 merge）
+        else:
+            i += 1
     return splits
 
-
-def pre_tokenize(text: str, special_tokens: list[str]) -> list[str]:
-    tokens = []
-    i = 0
-    n = len(text)
-
-    # Sort special tokens by length to prefer longest match
-    special_tokens = sorted(special_tokens, key=len, reverse=True)
-
-    def is_punct(ch):
-        return ("!" <= ch <= "/" or
-                ":" <= ch <= "@" or
-                "[" <= ch <= "`" or
-                "{" <= ch <= "~")
-
-    while i < n:
-        # 1. Try to match a special token at position i
-        matched = False
-        for sp in special_tokens:
-            if text.startswith(sp, i):
-                tokens.append(sp)
-                i += len(sp)
-                matched = True
-                break
-        if matched:
-            continue
-
-        ch = text[i]
-
-        # 2. Whitespace
-        if ch.isspace():
-            tokens.append(ch)
-            i += 1
-            continue
-
-        # 3. Punctuation
-        if is_punct(ch):
-            tokens.append(ch)
-            i += 1
-            continue
-
-        # 4. Normal token (accumulate)
-        start = i
-        i += 1
-        while i < n:
-            ch2 = text[i]
-            if ch2.isspace() or is_punct(ch2):
-                break
-
-            # Also must break if a special token begins here
-            if any(text.startswith(sp, i) for sp in special_tokens):
-                break
-
-            i += 1
-
-        tokens.append(text[start:i])
-
-    return tokens
-
-def process_chunk(
-    path: str,
-    start: int,
-    end: int,
-    special_tokens: list[str],
-) -> Counter:
-    """
-    Worker：在一个子进程里处理 [start, end) 这一段文件，
-    做 pre-tokenization 并返回 Counter。
-    """
-    cnt: Counter = Counter()
-    with open(path, "rb") as f:
-        f.seek(start)
-        data = f.read(end - start)
-    text = data.decode("utf-8", errors="ignore")
-    tokens = pre_tokenize(text, special_tokens)
-    cnt.update(tokens)
-    return cnt
-
-
-def count_pretokens_parallel(
-    path: str,
-    num_processes: int,
-    split_special_token: bytes,
-    special_tokens: list[str],
-) -> Counter:
-    """
-    整体入口：
-    - 用 find_chunk_boundaries 切块
-    - 多进程并行跑 pre-tokenizer + 计数
-    - 合并所有 Counter
-    """
-    with open(path, "rb") as f:
-        boundaries = find_chunk_boundaries(f, num_processes, split_special_token)
-
-    # 生成 (start, end) 列表
-    ranges = list(zip(boundaries[:-1], boundaries[1:]))
-
-    total_counter: Counter = Counter()
-
-    # 多进程并行
-    with ProcessPoolExecutor(max_workers=num_processes) as ex:
-        futures = [
-            ex.submit(process_chunk, path, start, end, special_tokens)
-            for start, end in ranges
-        ]
-        for fut in futures:
-            total_counter.update(fut.result())
-
-    return total_counter
